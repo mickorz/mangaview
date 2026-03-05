@@ -7,7 +7,7 @@ import {quasar, transformAssetUrls} from '@quasar/vite-plugin'
 import {VitePWA} from "vite-plugin-pwa";
 
 let showSourceMap = process.env.NODE_ENV === 'development';
-let version='v1.0';
+let version='v1.1.0';
 
 export default defineConfig({
     base:'./',

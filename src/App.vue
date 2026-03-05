@@ -3,10 +3,19 @@ import {useDropzone} from "vue3-dropzone";
 import {computed, watch, ref, nextTick} from "vue";
 import type {Ref} from 'vue'
 import {AppFullscreen, copyToClipboard} from 'quasar'
+import {db} from './utils/db'
+import CacheDialog from './components/CacheDialog.vue'
 
 let rightDrawerOpen = ref(true)
 let rightDrawerOpenWhenHide = ref(true)
 let rightDrawerUse = ref(false)
+
+// 缓存相关状态
+let showCacheDialog = ref(false)
+let cacheInitialized = ref(false)
+
+// 当前可见的图片索引（用于计算页码）
+let currentVisibleIndex = ref(0)
 
 watch([rightDrawerOpen, rightDrawerOpenWhenHide], () => {
   if (rightDrawerOpen.value || (!rightDrawerOpen.value && rightDrawerOpenWhenHide.value))
@@ -60,7 +69,12 @@ let filter = ref({
 
 let tab = ref(default_book)
 let tabIndex = computed(v => books.value.indexOf(tab.value))
+let skipNextScrollTop = false // 跳过下一次自动滚动到顶部
 watch(tab, () => {
+  if (skipNextScrollTop) {
+    skipNextScrollTop = false
+    return
+  }
   scroll_top(true)
 })
 
@@ -183,7 +197,7 @@ function dragenter(e: any) {
 }
 
 //start
-function onDrop(acceptFiles: File[]) {
+async function onDrop(acceptFiles: File[]) {
   showDragInput.value = false
   folders.value[default_book] = {}
   let lastFolder = default_book
@@ -206,13 +220,25 @@ function onDrop(acceptFiles: File[]) {
   folders.value = {...newFolders, ...oldFolders}
   tab.value = Object.keys(folders.value)[0] || default_book
   console.log(tab.value)
+
+  // 保存到 IndexedDB
+  try {
+    for (const bookName in newFolders) {
+      const bookFiles = Object.values(newFolders[bookName]) as File[]
+      await db.saveBook(bookName, bookFiles)
+    }
+  } catch (err) {
+    console.error('[App] 保存书籍到缓存失败', err)
+  }
 }
 
 let ImageUrls: { [key: string]: string } = {}
 
 function createUrl(file: any) {
   if (!file) return './img-default.png'
-  return ImageUrls[file.path] || (ImageUrls[file.path] = URL.createObjectURL(file))
+  // 使用文件名 + size 作为唯一键，因为从 IndexedDB 读取后 file.path 会丢失
+  const key = file.path || `${file.name}_${file.size}`
+  return ImageUrls[key] || (ImageUrls[key] = URL.createObjectURL(file))
 }
 
 let showHeader = ref(true)
@@ -220,6 +246,8 @@ let scroll = (e: MouseEvent) => {
   showHeader.value = false
   e.preventDefault()
   scrollSync()
+  updateVisibleIndex()
+  debouncedSaveProgress()
 }
 
 let scrollSync = (e?: any) => {
@@ -245,6 +273,13 @@ function removeBook(name: any = tab.value) {
       tab.value = books.value[idx]
     }
     delete folders.value[name]
+  }
+
+  // 从 IndexedDB 删除
+  try {
+    db.deleteBook(name)
+  } catch (err) {
+    console.error('[App] 删除缓存失败', err)
   }
 }
 
@@ -299,12 +334,102 @@ function copyBooksName() {
   copyToClipboard(list.join('\n'))
 }
 
+// 防抖保存进度
+let saveProgressTimer: number | null = null
+
+function debouncedSaveProgress() {
+  if (saveProgressTimer) {
+    clearTimeout(saveProgressTimer)
+  }
+  saveProgressTimer = window.setTimeout(async () => {
+    if (tab.value && tab.value !== default_book) {
+      try {
+        await db.saveProgress(tab.value, currentVisibleIndex.value)
+      } catch (err) {
+        console.error('[App] 保存进度失败', err)
+      }
+    }
+    saveProgressTimer = null
+  }, 500)
+}
+
+// 计算当前可见图片索引
+function updateVisibleIndex() {
+  if (!scrollArea) return
+
+  // 只选择主区域的图片，排除缩略图
+  const images = scrollArea.querySelectorAll('.relative-position img')
+  const viewportHeight = scrollArea.clientHeight
+
+  let closestIndex = 0
+  let closestDistance = Infinity
+
+  images.forEach((img, index) => {
+    const rect = img.getBoundingClientRect()
+    const imgCenter = rect.top + rect.height / 2
+    const distance = Math.abs(imgCenter - viewportHeight / 2)
+
+    if (distance < closestDistance) {
+      closestDistance = distance
+      closestIndex = index
+    }
+  })
+
+  currentVisibleIndex.value = closestIndex
+}
+
+// 加载缓存书籍
+async function loadBookFromCache(bookId: string) {
+  try {
+    const files = await db.getBook(bookId)
+    if (files && files.length > 0) {
+      const fileMap: Record<string, File> = {}
+      files.forEach((file: File) => {
+        fileMap[file.name] = file
+      })
+      folders.value[bookId] = fileMap
+      tab.value = bookId
+
+      // 恢复阅读进度
+      const pageIndex = await db.getProgress(bookId)
+      await nextTick()
+
+      // 滚动到指定页面
+      setTimeout(() => {
+        const targetImg = document.getElementById(pageIndex.toString())
+        if (targetImg) {
+          targetImg.scrollIntoView({behavior: 'smooth', block: 'start'})
+        }
+      }, 500)
+    }
+  } catch (err) {
+    console.error('[App] 加载缓存书籍失败', err)
+  }
+}
+
+// 缓存选择处理
+async function onCacheSelect(bookId: string) {
+  showCacheDialog.value = false
+  await loadBookFromCache(bookId)
+}
+
 
 let scrollArea: HTMLElement
 let scrollArea2: HTMLElement
 nextTick(() => {
   scrollArea = document.getElementById('scrollArea') || document.createElement('')
   scrollArea2 = document.getElementById('scrollArea2') || document.createElement('')
+
+  // 初始化 IndexedDB 并检查缓存
+  db.init().then(async () => {
+    cacheInitialized.value = true
+    const hasCache = await db.hasAnyCache()
+    if (hasCache) {
+      showCacheDialog.value = true
+    }
+  }).catch(err => {
+    console.error('[App] IndexedDB 初始化失败', err)
+  })
 })
 </script>
 
@@ -448,7 +573,7 @@ nextTick(() => {
             <div v-if="files.length===0" class="text-h4 q-pa-lg absolute-full cursor-pointer" style="direction: ltr"
                  @click="open">
               <div class="absolute-center">
-                Drag and drop folders here<br><br>请拖拽文件夹到此处<br><br>フォルダをドラッグ＆<br>ドロップしてしてください
+                Drag and drop folders here<br><br>请拖拽文件夹到此处
               </div>
             </div>
             <div class="relative-position">
@@ -484,6 +609,12 @@ nextTick(() => {
            @mousedown.left="dwStartChange" @mouseup.left="dwChange=false"
       />
     </q-drawer>
+    <!-- 缓存书架弹窗 -->
+    <CacheDialog
+      v-if="showCacheDialog"
+      @select="onCacheSelect"
+      @close="showCacheDialog = false"
+    />
   </q-layout>
   <div id="drag-input" :class="[showDragInput&&'show']" v-bind="getRootProps()">
     <input v-bind="getInputProps()" accept="image/*" webkitdirectory multiple/>

@@ -1,7 +1,6 @@
 #  mangaview
 
-#漫画阅读器  #本子阅读器  #同人志阅读器 #条漫阅读器\
-#漫画ビューア #同人誌ビューア #漫画リーダー
+#漫画阅读器  #本子阅读器  #同人志阅读器 #条漫阅读器
 
 Manga explorer reader viewer, only support image files\
 recommended to use [Chrome](https://www.google.com/chrome/) with the latest version
